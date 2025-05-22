@@ -1,57 +1,74 @@
-classdef TangentFuzzyRobot < handle
+classdef FuzzyPathFollower < handle
     properties
+        % Hardware Interface
         SerialPort
+        
+        % Path Information
         Waypoints
         CurrentWaypointIndex
-        FuzzySystem
-        Running
         PositionHistory
-        LinearSpeed = 0.5; % m/s
+        
+        % Fuzzy System
+        FuzzySystem
+        
+        % Control Parameters
+        Running
+        LinearSpeed = 0.5    % m/s
+        LookaheadDistance = 1.0  % meters
+        WaypointThreshold = 0.5  % meters
     end
     
     methods
-        function obj = TangentFuzzyRobot(portName)
+        function obj = FuzzyPathFollower(portName)
+            % Initialize serial communication
             obj.SerialPort = serialport(portName, 115200);
             configureTerminator(obj.SerialPort, "LF");
             flush(obj.SerialPort);
             
-            % Example waypoints (replace with your path)
+            % Define your waypoints (latitude, longitude)
             obj.Waypoints = [
                 7.214920, 124.249217;
                 7.214926, 124.249230;
                 7.214932, 124.249243;
-                7.214938, 124.249256
+                7.214938, 124.249256;
+                7.214945, 124.249269
             ];
             
+            % Initialize state variables
             obj.CurrentWaypointIndex = 1;
             obj.Running = false;
             obj.PositionHistory = [];
             
-            % Initialize fuzzy system
+            % Create fuzzy logic controller
             obj.FuzzySystem = obj.createFuzzySystem();
+            
+            % Visualize the fuzzy system
+            obj.plotFuzzySystem();
         end
         
         function fis = createFuzzySystem(obj)
-            fis = mamfis('Name', 'TangentController');
+            % Create new fuzzy inference system
+            fis = mamfis('Name', 'PathFollower');
             
-            % Cross-track error (meters)
+            % Input 1: Cross-Track Error (meters)
             fis = addInput(fis, [-2 2], 'Name', 'cross_track');
             fis = addMF(fis, 'cross_track', 'trapmf', [-2 -2 -0.5 -0.1], 'Name', 'Left');
             fis = addMF(fis, 'cross_track', 'trimf', [-0.3 0 0.3], 'Name', 'Center');
             fis = addMF(fis, 'cross_track', 'trapmf', [0.1 0.5 2 2], 'Name', 'Right');
             
-            % Heading error (degrees)
+            % Input 2: Heading Error (degrees)
             fis = addInput(fis, [-180 180], 'Name', 'heading_error');
             fis = addMF(fis, 'heading_error', 'trapmf', [-180 -180 -30 -10], 'Name', 'Left');
             fis = addMF(fis, 'heading_error', 'trimf', [-20 0 20], 'Name', 'Aligned');
             fis = addMF(fis, 'heading_error', 'trapmf', [10 30 180 180], 'Name', 'Right');
             
-            % PWM outputs
+            % Output 1: Left Motor PWM (-100 to 100)
             fis = addOutput(fis, [-100 100], 'Name', 'left_pwm');
             fis = addMF(fis, 'left_pwm', 'trimf', [-100 -100 0], 'Name', 'Reverse');
             fis = addMF(fis, 'left_pwm', 'trimf', [-50 0 50], 'Name', 'Slow');
             fis = addMF(fis, 'left_pwm', 'trimf', [0 100 100], 'Name', 'Forward');
             
+            % Output 2: Right Motor PWM (-100 to 100)
             fis = addOutput(fis, [-100 100], 'Name', 'right_pwm');
             fis = addMF(fis, 'right_pwm', 'trimf', [-100 -100 0], 'Name', 'Reverse');
             fis = addMF(fis, 'right_pwm', 'trimf', [-50 0 50], 'Name', 'Slow');
@@ -59,87 +76,194 @@ classdef TangentFuzzyRobot < handle
             
             % Rule Base
             ruleList = [
-                1 1 3 2 1 1;   % Left cross + Left heading → Forward Left, Slow Right
-                1 2 3 2 1 1;   % Left cross + Aligned → Forward Left, Slow Right
-                1 3 3 1 1 1;   % Left cross + Right heading → Forward Left, Reverse Right
+                1 1 3 2 1 1;   % If Left cross-track AND Left heading → Forward Left, Slow Right
+                1 2 3 2 1 1;   % If Left cross-track AND Aligned → Forward Left, Slow Right
+                1 3 3 1 1 1;   % If Left cross-track AND Right heading → Forward Left, Reverse Right
                 
-                2 1 2 3 1 1;   % Center + Left heading → Slow Left, Forward Right
-                2 2 3 3 1 1;   % Center + Aligned → Forward both
-                2 3 3 2 1 1;   % Center + Right heading → Forward Left, Slow Right
+                2 1 2 3 1 1;   % If Center cross-track AND Left heading → Slow Left, Forward Right
+                2 2 3 3 1 1;   % If Center cross-track AND Aligned → Forward both
+                2 3 3 2 1 1;   % If Center cross-track AND Right heading → Forward Left, Slow Right
                 
-                3 1 1 3 1 1;   % Right cross + Left heading → Reverse Left, Forward Right
-                3 2 2 3 1 1;   % Right cross + Aligned → Slow Left, Forward Right
-                3 3 2 3 1 1;   % Right cross + Right heading → Slow Left, Forward Right
+                3 1 1 3 1 1;   % If Right cross-track AND Left heading → Reverse Left, Forward Right
+                3 2 2 3 1 1;   % If Right cross-track AND Aligned → Slow Left, Forward Right
+                3 3 2 3 1 1;   % If Right cross-track AND Right heading → Slow Left, Forward Right
             ];
             
             fis = addRule(fis, ruleList);
         end
         
+        function plotFuzzySystem(obj)
+            % Visualize membership functions
+            figure('Name', 'Fuzzy System Visualization');
+            subplot(2,2,1); plotmf(obj.FuzzySystem, 'input', 1); title('Cross-Track Error');
+            subplot(2,2,2); plotmf(obj.FuzzySystem, 'input', 2); title('Heading Error');
+            subplot(2,2,3); plotmf(obj.FuzzySystem, 'output', 1); title('Left PWM');
+            subplot(2,2,4); plotmf(obj.FuzzySystem, 'output', 2); title('Right PWM');
+            
+            % Visualize control surface
+            figure('Name', 'Control Surface');
+            gensurf(obj.FuzzySystem);
+        end
+        
         function start(obj)
             obj.Running = true;
+            disp('Path following started');
+            
+            % Create figure for real-time visualization
+            hFig = figure('Name', 'Robot Path Following', 'NumberTitle', 'off');
+            
             while obj.Running
-                if obj.SerialPort.NumBytesAvailable > 0
-                    data = readline(obj.SerialPort);
-                    if startsWith(data, "GPS:")
-                        obj.processGPSData(data);
+                try
+                    % Check for GPS data
+                    if obj.SerialPort.NumBytesAvailable > 0
+                        data = readline(obj.SerialPort);
+                        
+                        if startsWith(data, "GPS:")
+                            % Process GPS update
+                            obj.processGPSData(data);
+                            
+                            % Update visualization
+                            obj.updatePlot(hFig);
+                        end
                     end
+                    
+                    % Small delay to prevent CPU overload
+                    pause(0.05);
+                    
+                    % Check if figure is still open
+                    if ~isvalid(hFig)
+                        obj.stop();
+                    end
+                    
+                catch ME
+                    warning('Error in main loop: %s', ME.message);
+                    obj.stop();
                 end
-                pause(0.1);
             end
         end
         
         function processGPSData(obj, data)
+            % Parse GPS data
             gpsData = sscanf(data, "GPS:%f,%f,%f,%f");
-            if length(gpsData) == 4
-                [lat, lon, ~, heading] = deal(gpsData(1), gpsData(2), gpsData(3), gpsData(4));
-                obj.PositionHistory = [obj.PositionHistory; lat, lon];
-                
-                % Get current path segment
-                wpA = obj.Waypoints(obj.CurrentWaypointIndex, :);
-                wpB = obj.Waypoints(obj.CurrentWaypointIndex + 1, :);
-                
-                % Calculate errors
-                e = obj.calculateCrossTrackError([lat, lon], wpA, wpB);
-                deltaPsi = obj.calculateHeadingError(heading, wpA, wpB);
-                
-                % Fuzzy logic control
-                inputs = [e, deltaPsi];
-                outputs = evalfis(obj.FuzzySystem, inputs);
-                
-                % Send motor command
-                cmdStr = sprintf("CMD:%d,%d", round(outputs(1)), round(outputs(2)));
-                writeline(obj.SerialPort, cmdStr);
-                
-                % Check waypoint progression
-                if obj.calculateDistance(lat, lon, wpB(1), wpB(2)) < 0.5 % 0.5m threshold
-                    obj.CurrentWaypointIndex = obj.CurrentWaypointIndex + 1;
-                    if obj.CurrentWaypointIndex >= size(obj.Waypoints, 1)
-                        obj.stop();
-                    end
+            if length(gpsData) ~= 4
+                return;
+            end
+            
+            [lat, lon, ~, heading] = deal(gpsData(1), gpsData(2), gpsData(3), gpsData(4));
+            obj.PositionHistory = [obj.PositionHistory; lat, lon];
+            
+            % Get current path segment
+            wpA = obj.Waypoints(obj.CurrentWaypointIndex, :);
+            wpB = obj.Waypoints(min(obj.CurrentWaypointIndex + 1, size(obj.Waypoints, 1)), :);
+            
+            % Calculate control errors
+            crossTrackError = obj.calculateCrossTrackError([lat, lon], wpA, wpB);
+            headingError = obj.calculateHeadingError(heading, wpA, wpB);
+            
+            % Fuzzy logic decision
+            inputs = [crossTrackError, headingError];
+            outputs = evalfis(obj.FuzzySystem, inputs);
+            
+            % Send motor commands
+            leftPWM = round(outputs(1));
+            rightPWM = round(outputs(2));
+            cmdStr = sprintf("CMD:%d,%d", leftPWM, rightPWM);
+            writeline(obj.SerialPort, cmdStr);
+            
+            % Check waypoint progression
+            distanceToWaypoint = obj.calculateDistance(lat, lon, wpB(1), wpB(2));
+            if distanceToWaypoint < obj.WaypointThreshold
+                obj.CurrentWaypointIndex = obj.CurrentWaypointIndex + 1;
+                if obj.CurrentWaypointIndex >= size(obj.Waypoints, 1)
+                    obj.stop();
+                    disp('Final waypoint reached!');
                 end
             end
         end
         
         function e = calculateCrossTrackError(obj, robotPos, wpA, wpB)
-            % Vector math implementation (as shown earlier)
-            % ... (same as previous cross-track error implementation)
+            % Convert to meters (simplified for small distances)
+            x = (robotPos(2) - wpA(2)) * 111320 * cosd(robotPos(1));
+            y = (robotPos(1) - wpA(1)) * 111320;
+            
+            segX = (wpB(2) - wpA(2)) * 111320 * cosd(robotPos(1));
+            segY = (wpB(1) - wpA(1)) * 111320;
+            
+            % Projection calculation
+            proj = (x * segX + y * segY) / (segX^2 + segY^2);
+            proj = max(0, min(1, proj));
+            
+            % Nearest point on segment
+            nearestX = wpA(2) + proj * (wpB(2) - wpA(2));
+            nearestY = wpA(1) + proj * (wpB(1) - wpA(1));
+            
+            % Cross-track error with sign
+            e = obj.calculateDistance(robotPos(1), robotPos(2), nearestY, nearestX);
+            crossProd = segX * y - segY * x;
+            e = sign(crossProd) * e;
         end
         
         function deltaPsi = calculateHeadingError(obj, robotHeading, wpA, wpB)
+            % Calculate path tangent direction
             pathHeading = atan2d(wpB(2) - wpA(2), wpB(1) - wpA(1));
+            
+            % Wrap angle difference to [-180, 180]
             deltaPsi = mod(robotHeading - pathHeading + 180, 360) - 180;
         end
         
         function d = calculateDistance(~, lat1, lon1, lat2, lon2)
-            % Haversine formula (as shown earlier)
+            % Haversine formula (meters)
+            R = 6371000;
+            dLat = deg2rad(lat2 - lat1);
+            dLon = deg2rad(lon2 - lon1);
+            a = sin(dLat/2)^2 + cos(deg2rad(lat1)) * cos(deg2rad(lat2)) * sin(dLon/2)^2;
+            d = 2 * R * asin(sqrt(a));
+        end
+        
+        function updatePlot(obj, hFig)
+            if ~isvalid(hFig)
+                return;
+            end
+            
+            figure(hFig);
+            clf;
+            
+            % Plot waypoints
+            plot(obj.Waypoints(:,2), obj.Waypoints(:,1), 'g-o', 'LineWidth', 2);
+            hold on;
+            
+            % Plot path history
+            if ~isempty(obj.PositionHistory)
+                plot(obj.PositionHistory(:,2), obj.PositionHistory(:,1), 'b-', 'LineWidth', 1.5);
+            end
+            
+            % Plot current position
+            if ~isempty(obj.PositionHistory)
+                plot(obj.PositionHistory(end,2), obj.PositionHistory(end,1), 'ro', 'MarkerSize', 10, 'MarkerFaceColor', 'r');
+            end
+            
+            % Plot current target waypoint
+            if obj.CurrentWaypointIndex <= size(obj.Waypoints, 1)
+                plot(obj.Waypoints(obj.CurrentWaypointIndex, 2), obj.Waypoints(obj.CurrentWaypointIndex, 1), 'yx', 'MarkerSize', 15, 'LineWidth', 2);
+            end
+            
+            xlabel('Longitude');
+            ylabel('Latitude');
+            title('Robot Path Following');
+            legend('Planned Path', 'Actual Path', 'Robot', 'Target', 'Location', 'best');
+            grid on;
+            drawnow;
         end
         
         function stop(obj)
+            % Send stop command
             writeline(obj.SerialPort, "CMD:0,0");
             obj.Running = false;
+            disp('Path following stopped');
         end
         
         function delete(obj)
+            % Cleanup when object is destroyed
             if obj.Running
                 obj.stop();
             end
