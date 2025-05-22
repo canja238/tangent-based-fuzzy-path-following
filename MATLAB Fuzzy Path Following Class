@@ -1,0 +1,149 @@
+classdef TangentFuzzyRobot < handle
+    properties
+        SerialPort
+        Waypoints
+        CurrentWaypointIndex
+        FuzzySystem
+        Running
+        PositionHistory
+        LinearSpeed = 0.5; % m/s
+    end
+    
+    methods
+        function obj = TangentFuzzyRobot(portName)
+            obj.SerialPort = serialport(portName, 115200);
+            configureTerminator(obj.SerialPort, "LF");
+            flush(obj.SerialPort);
+            
+            % Example waypoints (replace with your path)
+            obj.Waypoints = [
+                7.214920, 124.249217;
+                7.214926, 124.249230;
+                7.214932, 124.249243;
+                7.214938, 124.249256
+            ];
+            
+            obj.CurrentWaypointIndex = 1;
+            obj.Running = false;
+            obj.PositionHistory = [];
+            
+            % Initialize fuzzy system
+            obj.FuzzySystem = obj.createFuzzySystem();
+        end
+        
+        function fis = createFuzzySystem(obj)
+            fis = mamfis('Name', 'TangentController');
+            
+            % Cross-track error (meters)
+            fis = addInput(fis, [-2 2], 'Name', 'cross_track');
+            fis = addMF(fis, 'cross_track', 'trapmf', [-2 -2 -0.5 -0.1], 'Name', 'Left');
+            fis = addMF(fis, 'cross_track', 'trimf', [-0.3 0 0.3], 'Name', 'Center');
+            fis = addMF(fis, 'cross_track', 'trapmf', [0.1 0.5 2 2], 'Name', 'Right');
+            
+            % Heading error (degrees)
+            fis = addInput(fis, [-180 180], 'Name', 'heading_error');
+            fis = addMF(fis, 'heading_error', 'trapmf', [-180 -180 -30 -10], 'Name', 'Left');
+            fis = addMF(fis, 'heading_error', 'trimf', [-20 0 20], 'Name', 'Aligned');
+            fis = addMF(fis, 'heading_error', 'trapmf', [10 30 180 180], 'Name', 'Right');
+            
+            % PWM outputs
+            fis = addOutput(fis, [-100 100], 'Name', 'left_pwm');
+            fis = addMF(fis, 'left_pwm', 'trimf', [-100 -100 0], 'Name', 'Reverse');
+            fis = addMF(fis, 'left_pwm', 'trimf', [-50 0 50], 'Name', 'Slow');
+            fis = addMF(fis, 'left_pwm', 'trimf', [0 100 100], 'Name', 'Forward');
+            
+            fis = addOutput(fis, [-100 100], 'Name', 'right_pwm');
+            fis = addMF(fis, 'right_pwm', 'trimf', [-100 -100 0], 'Name', 'Reverse');
+            fis = addMF(fis, 'right_pwm', 'trimf', [-50 0 50], 'Name', 'Slow');
+            fis = addMF(fis, 'right_pwm', 'trimf', [0 100 100], 'Name', 'Forward');
+            
+            % Rule Base
+            ruleList = [
+                1 1 3 2 1 1;   % Left cross + Left heading → Forward Left, Slow Right
+                1 2 3 2 1 1;   % Left cross + Aligned → Forward Left, Slow Right
+                1 3 3 1 1 1;   % Left cross + Right heading → Forward Left, Reverse Right
+                
+                2 1 2 3 1 1;   % Center + Left heading → Slow Left, Forward Right
+                2 2 3 3 1 1;   % Center + Aligned → Forward both
+                2 3 3 2 1 1;   % Center + Right heading → Forward Left, Slow Right
+                
+                3 1 1 3 1 1;   % Right cross + Left heading → Reverse Left, Forward Right
+                3 2 2 3 1 1;   % Right cross + Aligned → Slow Left, Forward Right
+                3 3 2 3 1 1;   % Right cross + Right heading → Slow Left, Forward Right
+            ];
+            
+            fis = addRule(fis, ruleList);
+        end
+        
+        function start(obj)
+            obj.Running = true;
+            while obj.Running
+                if obj.SerialPort.NumBytesAvailable > 0
+                    data = readline(obj.SerialPort);
+                    if startsWith(data, "GPS:")
+                        obj.processGPSData(data);
+                    end
+                end
+                pause(0.1);
+            end
+        end
+        
+        function processGPSData(obj, data)
+            gpsData = sscanf(data, "GPS:%f,%f,%f,%f");
+            if length(gpsData) == 4
+                [lat, lon, ~, heading] = deal(gpsData(1), gpsData(2), gpsData(3), gpsData(4));
+                obj.PositionHistory = [obj.PositionHistory; lat, lon];
+                
+                % Get current path segment
+                wpA = obj.Waypoints(obj.CurrentWaypointIndex, :);
+                wpB = obj.Waypoints(obj.CurrentWaypointIndex + 1, :);
+                
+                % Calculate errors
+                e = obj.calculateCrossTrackError([lat, lon], wpA, wpB);
+                deltaPsi = obj.calculateHeadingError(heading, wpA, wpB);
+                
+                % Fuzzy logic control
+                inputs = [e, deltaPsi];
+                outputs = evalfis(obj.FuzzySystem, inputs);
+                
+                % Send motor command
+                cmdStr = sprintf("CMD:%d,%d", round(outputs(1)), round(outputs(2)));
+                writeline(obj.SerialPort, cmdStr);
+                
+                % Check waypoint progression
+                if obj.calculateDistance(lat, lon, wpB(1), wpB(2)) < 0.5 % 0.5m threshold
+                    obj.CurrentWaypointIndex = obj.CurrentWaypointIndex + 1;
+                    if obj.CurrentWaypointIndex >= size(obj.Waypoints, 1)
+                        obj.stop();
+                    end
+                end
+            end
+        end
+        
+        function e = calculateCrossTrackError(obj, robotPos, wpA, wpB)
+            % Vector math implementation (as shown earlier)
+            % ... (same as previous cross-track error implementation)
+        end
+        
+        function deltaPsi = calculateHeadingError(obj, robotHeading, wpA, wpB)
+            pathHeading = atan2d(wpB(2) - wpA(2), wpB(1) - wpA(1));
+            deltaPsi = mod(robotHeading - pathHeading + 180, 360) - 180;
+        end
+        
+        function d = calculateDistance(~, lat1, lon1, lat2, lon2)
+            % Haversine formula (as shown earlier)
+        end
+        
+        function stop(obj)
+            writeline(obj.SerialPort, "CMD:0,0");
+            obj.Running = false;
+        end
+        
+        function delete(obj)
+            if obj.Running
+                obj.stop();
+            end
+            clear obj.SerialPort;
+        end
+    end
+end
